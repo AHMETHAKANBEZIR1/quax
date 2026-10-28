@@ -141,17 +141,16 @@ def dynamic_slice_zero(operand: Zero, *indices, slice_sizes) -> Zero:
 
 @quax.register(lax.slice_p)
 def slice_zero(operand: Zero, *, start_indices, limit_indices, strides) -> Zero:
-    if strides is None:
-        strides = [1 for _ in start_indices]
-    # `len(range(...))` gives the strided-slice output length exactly, matching
-    # JAX. A plain `(limit - start) // stride` floors and is off by one whenever
-    # the span is not a multiple of the stride (e.g. start=0, limit=5, stride=2
-    # selects indices 0, 2, 4 -> length 3, not 2).
-    shape = [
-        len(range(start, limit, stride))
-        for start, limit, stride in zip(start_indices, limit_indices, strides)
-    ]
-    return Zero(tuple(shape), operand.dtype)
+    out = jax.eval_shape(
+        ft.partial(
+            lax.slice_p.bind,
+            start_indices=start_indices,
+            limit_indices=limit_indices,
+            strides=strides,
+        ),
+        jax.ShapeDtypeStruct(operand.shape, operand.dtype),
+    )
+    return Zero(out.shape, out.dtype)
 
 
 def _zero_matmul(lhs, rhs, kwargs) -> Zero:
@@ -181,12 +180,13 @@ def dot_general_zero_zero(lhs: Zero, rhs: Zero, **kwargs) -> Zero:
 
 
 @quax.register(lax.integer_pow_p)
-def _integer_pow(x: Zero, *, y: int) -> Array | Zero:
+def integer_pow_zero(x: Zero, *, y: int) -> Array | Zero:
     # Zero is a special case, because 0^0 = 1.
     if y == 0:
         return jnp.ones(x.shape, x.dtype)  # pyright: ignore[reportArgumentType]
 
-    # Otherwise, we can just return a zero.
-    # Inf and NaN are not integers, so we don't need to worry about them.
-    del y
+    if y < 0:
+        return lax.integer_pow(x.materialise(), y)
+
+    # Positive integer powers preserve the symbolic zero.
     return x
