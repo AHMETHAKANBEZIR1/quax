@@ -1,45 +1,54 @@
-import importlib.util
-from pathlib import Path
+"""Test repository collection policy rather than array operations.
+
+Keep these checks in tests/repo so the benchmark opt-in gate cannot hide them.
+"""
+
+import sys
 from types import SimpleNamespace
 
 import pytest
 
-
-@pytest.fixture()
-def benchmark_collection():
-    source = Path(__file__).parents[1] / "benchmark" / "conftest.py"
-    spec = importlib.util.spec_from_file_location("benchmark_collection", source)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+from ..benchmark import conftest as benchmark_collection
 
 
-@pytest.mark.parametrize("plugin_available", [False, True])
-@pytest.mark.parametrize("explicit", [False, True])
-@pytest.mark.parametrize("noncanonical", [False, True])
+def _config(target):
+    return SimpleNamespace(
+        args=[str(target)], invocation_params=SimpleNamespace(args=())
+    )
+
+
+@pytest.mark.parametrize(
+    ("path_kind", "plugin_available", "explicit", "expected"),
+    [
+        pytest.param("symlink", False, False, True, id="symlink-no-plugin"),
+        pytest.param("symlink", False, True, True, id="symlink-explicit-no-plugin"),
+        pytest.param("symlink", True, True, None, id="symlink-explicit-plugin"),
+        pytest.param("canonical", True, False, True, id="ordinary-with-plugin"),
+        pytest.param("other", False, False, None, id="unrelated-directory"),
+    ],
+)
 def test_benchmark_collection_paths(
-    benchmark_collection, monkeypatch, plugin_available, explicit, noncanonical
+    monkeypatch,
+    tmp_path,
+    path_kind,
+    plugin_available,
+    explicit,
+    expected,
 ):
     module = benchmark_collection
     here = module._HERE
     path = here / "test_numpy.py"
-    if noncanonical:
-        path = here.parent / "unit" / ".." / "benchmark" / "test_numpy.py"
+    if path_kind == "symlink":
+        link = tmp_path / "checkout"
+        try:
+            link.symlink_to(here.parents[1], target_is_directory=True)
+        except OSError as error:
+            if sys.platform == "win32" and getattr(error, "winerror", None) == 1314:
+                pytest.skip("Creating symlinks requires a Windows privilege")
+            raise
+        path = link / "tests" / "benchmark" / "test_numpy.py"
+    elif path_kind == "other":
+        path = here.parent / "unit" / "test_core.py"
     monkeypatch.setattr(module, "_benchmark_plugin_available", lambda: plugin_available)
-    config = SimpleNamespace(
-        args=[str(here)] if explicit else [str(here.parent)],
-        invocation_params=SimpleNamespace(args=()),
-    )
-    expected = None if plugin_available and explicit else True
+    config = _config(path.parent if explicit else here.parent)
     assert module.pytest_ignore_collect(path, config) is expected
-
-
-def test_benchmark_collection_leaves_other_directories(
-    benchmark_collection, monkeypatch
-):
-    module = benchmark_collection
-    monkeypatch.setattr(module, "_benchmark_plugin_available", lambda: False)
-    config = SimpleNamespace(args=[], invocation_params=SimpleNamespace(args=()))
-    path = module._HERE.parent / "unit" / "test_core.py"
-    assert module.pytest_ignore_collect(path, config) is None
